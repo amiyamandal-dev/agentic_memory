@@ -1,0 +1,152 @@
+classDiagram
+    %% Core Entity Classes
+    class Agent {
+        +agent_id: String
+        +agent_name: String
+        +agent_version: String
+        +agent_role: String
+        +metadata: JSON
+        +created_at: DateTime
+    }
+    
+    class Workflow {
+        +workflow_id: UUID
+        +workflow_name: String
+        +workflow_owner: String
+        +definition_json: JSON
+        +status: String
+        +created_at: DateTime
+        +updated_at: DateTime
+    }
+    
+    %% Orchestration & Execution Classes
+    class AgentOrchestration {
+        +orchestration_id: UUID
+        +orchestration_type: String
+        +root_agent_id: String
+        +participating_agents: JSON
+        +status: String
+        +started_at: DateTime
+        +ended_at: DateTime
+        +correlation_id: UUID
+        +metadata: JSON
+    }
+    
+    class WorkflowExecutionNode {
+        +exec_node_id: UUID
+        +node_id: String
+        +node_type: String
+        +assigned_agent_id: String
+        +status: String
+        +scheduled_at: DateTime
+        +started_at: DateTime
+        +completed_at: DateTime
+        +input_payload: JSON
+        +output_payload: JSON
+        +span_id: String
+        +metadata: JSON
+    }
+    
+    %% Inter-Agent Communication Classes
+    class InterAgentMessage {
+        +message_id: UUID
+        +sender_agent_id: String
+        +receiver_agent_id: String
+        +message_type: String
+        +protocol: String
+        +content: JSON
+        +size_bytes: Integer
+        +sent_at: DateTime
+        +delivered_at: DateTime
+        +status: String
+        +trace_context: JSON
+        +latency_ms: Integer
+    }
+    
+    %% Shared Memory Classes
+    class SharedMemoryPool {
+        +pool_id: UUID
+        +pool_name: String
+        +scope: String
+        +crdt_type: String
+        +consistency_level: String
+        +state_json: JSON
+        +vector_clock: JSON
+        +version_int: Integer
+        +lock_info: JSON
+        +conflict_count: Integer
+        +last_modified_at: DateTime
+    }
+    
+    class MemoryAccessLog {
+        +access_id: UUID
+        +access_type: String
+        +json_path: String
+        +previous_value: JSON
+        +new_value: JSON
+        +requested_at: DateTime
+        +completed_at: DateTime
+        +status: String
+        +conflict_details: JSON
+        +lock_wait_ms: Integer
+        +duration_ms: Integer
+    }
+    
+    %% Coordination & Anomaly Classes
+    class CoordinationEvent {
+        +event_id: UUID
+        +event_type: String
+        +source_agent_id: String
+        +target_agents: JSON
+        +event_payload: JSON
+        +event_ts: DateTime
+        +success: Boolean
+        +latency_ms: Integer
+        +anomaly_score: Decimal
+        +trace_context: JSON
+    }
+    
+    %% Performance & Trace Classes
+    class DistributedTraceMap {
+        +correlation_id: UUID
+        +root_trace_id: String
+        +child_trace_ids: JSON
+    }
+    
+    class AgentPerformanceMetric {
+        +metric_id: UUID
+        +cpu_ms: BigInt
+        +token_in: Integer
+        +token_out: Integer
+        +cost_usd: Decimal
+        +error_count: Integer
+        +recorded_at: DateTime
+    }
+    
+    %% Relationships
+    %% Agent Relationships
+    Agent "1" -- "0..*" AgentOrchestration : "initiates/participates"
+    Agent "1" -- "0..*" WorkflowExecutionNode : "executes"
+    Agent "1" -- "0..*" InterAgentMessage : "sends"
+    Agent "1" -- "0..*" InterAgentMessage : "receives"
+    Agent "1" -- "0..*" MemoryAccessLog : "performs access"
+    Agent "1" -- "0..*" CoordinationEvent : "triggers/generates"
+    Agent "1" -- "0..*" AgentPerformanceMetric : "produces metrics"
+    
+    %% Workflow Relationships
+    Workflow "1" -- "0..*" AgentOrchestration : "template for"
+    
+    %% Orchestration Relationships
+    AgentOrchestration "1" -- "1..*" WorkflowExecutionNode : "decomposes into"
+    AgentOrchestration "1" -- "0..*" InterAgentMessage : "scopes"
+    AgentOrchestration "1" -- "0..*" SharedMemoryPool : "owns/creates"
+    AgentOrchestration "1" -- "0..*" MemoryAccessLog : "aggregates"
+    AgentOrchestration "1" -- "0..*" CoordinationEvent : "encompasses"
+    AgentOrchestration "1" -- "0..*" AgentPerformanceMetric : "aggregates"
+    AgentOrchestration "1" -- "1" DistributedTraceMap : "maps to"
+    
+    %% Memory Relationships
+    SharedMemoryPool "1" -- "0..*" MemoryAccessLog : "tracks all access"
+    
+    %% Directional Relationships
+    WorkflowExecutionNode "1" -- "0..1" Agent : "assigned to"

@@ -120,7 +120,7 @@ class ConfigManager:
     
     def validate_config(self, config):
         """Validate required configuration keys"""
-        required_keys = ['catalog_name', 'schema_name', 'serving_endpoint_configs_table', 'workspace_url']
+        required_keys = ['workspace_url']
         
         missing_keys = [key for key in required_keys if not config.get(key)]
         if missing_keys:
@@ -169,6 +169,7 @@ def row_to_key_value_list(data):
 
 # DBTITLE 1, API Client Class
 import requests
+import pandas as pd
 from databricks.sdk import WorkspaceClient
 
 class APIClient:
@@ -196,6 +197,49 @@ class APIClient:
             self.workspace_client = WorkspaceClient()
             logger.success("WorkspaceClient initialized with notebook context")
     
+    def fetch_all_endpoints(self):
+        """Fetch all serving endpoints from API and return as list of dicts"""
+        try:
+            logger.debug("Fetching all serving endpoints from API")
+            
+            response = requests.get(
+                self.workspace_url,
+                headers=self.headers,
+                timeout=300
+            )
+            
+            if response.status_code != 200:
+                logger.error(f"API returned {response.status_code}: {response.text}")
+                return []
+            
+            endpoints_data = response.json().get("endpoints", [])
+            logger.success(f"Fetched {len(endpoints_data)} endpoints from API")
+            return endpoints_data
+            
+        except Exception as e:
+            logger.error(f"Failed to fetch endpoints from API: {str(e)}")
+            return []
+    
+    def get_endpoint_details(self, endpoint_name):
+        """Get detailed configuration for a specific endpoint"""
+        try:
+            logger.debug(f"Fetching detailed endpoint configuration", endpoint_name)
+            
+            url = f"{self.workspace_url}/{endpoint_name}"
+            response = requests.get(url, headers=self.headers, timeout=300)
+            
+            if response.status_code != 200:
+                logger.error(f"Failed to get endpoint details: {response.status_code}", endpoint_name)
+                return None
+            
+            endpoint_details = response.json()
+            logger.success(f"Endpoint details fetched successfully", endpoint_name)
+            return endpoint_details
+            
+        except Exception as e:
+            logger.error(f"Failed to fetch endpoint details: {str(e)}", endpoint_name)
+            return None
+    
     def make_post_request(self, payload, endpoint_name=""):
         """Make POST request to create endpoint"""
         try:
@@ -205,7 +249,7 @@ class APIClient:
             response = requests.post(
                 self.workspace_url,
                 headers=self.headers,
-                json=payload,  # Using json parameter instead of data + json.dumps
+                json=payload,
                 timeout=300
             )
             
@@ -231,37 +275,27 @@ class APIClient:
 # COMMAND ----------
 
 # DBTITLE 1, Endpoint Configuration Fetcher Class
-from pyspark.sql.functions import col
-
 class EndpointConfigFetcher:
-    """Fetches endpoint configuration from Delta table"""
+    """Fetches endpoint configuration from pandas DataFrame"""
     
-    def __init__(self, full_table_path):
-        self.full_table_path = full_table_path
-        logger.info(f"Initializing EndpointConfigFetcher for table: {full_table_path}")
+    def __init__(self, endpoints_df):
+        self.endpoints_df = endpoints_df
+        logger.info(f"Initializing EndpointConfigFetcher with {len(endpoints_df)} endpoints")
     
     def fetch_endpoint_config(self, endpoint_name):
-        """Fetch single endpoint configuration"""
+        """Fetch single endpoint configuration from DataFrame"""
         try:
-            logger.debug(f"Fetching configuration from table", endpoint_name)
+            logger.debug(f"Fetching configuration from DataFrame", endpoint_name)
             
-            # Check if table exists first
-            try:
-                spark.sql(f"SELECT COUNT(*) FROM `{self.full_table_path}`")
-            except Exception as e:
-                logger.error(f"Configuration table does not exist: {str(e)}", endpoint_name)
+            # Filter DataFrame for the endpoint
+            matching_rows = self.endpoints_df[self.endpoints_df['name'] == endpoint_name]
+            
+            if len(matching_rows) == 0:
+                logger.error(f"Endpoint not found in configuration data", endpoint_name)
                 return None
             
-            # Fetch the endpoint configuration
-            df = spark.table(self.full_table_path).filter(col("name") == endpoint_name)
-            
-            if df.count() == 0:
-                logger.error(f"Endpoint not found in configuration table", endpoint_name)
-                return None
-            
-            endpoint_row = df.collect()[0]
-            # Convert Row to dictionary safely
-            endpoint_config = endpoint_row.asDict(recursive=False)
+            # Convert row to dictionary
+            endpoint_config = matching_rows.iloc[0].to_dict()
             
             logger.success(f"Configuration fetched successfully", endpoint_name)
             return endpoint_config
@@ -482,8 +516,7 @@ class EndpointCreator:
 class MigrationOrchestrator:
     """Orchestrates the entire migration process"""
     
-    def __init__(self, config, api_client, fetcher, deleter, renamer, creator):
-        self.config = config
+    def __init__(self, api_client, fetcher, deleter, renamer, creator):
         self.api_client = api_client
         self.fetcher = fetcher
         self.deleter = deleter
@@ -595,13 +628,9 @@ config = config_manager.load_config()
 config_manager.validate_config(config)
 
 # Extract configuration values
-catalog_name = config.get('catalog_name')
-schema_name = config.get('schema_name')
-serving_endpoint_configs_table = config.get('serving_endpoint_configs_table')
 DATABRICKS_HOST = config.get('workspace_url')
-full_table_path = f"{catalog_name}.{schema_name}.{serving_endpoint_configs_table}"
 
-logger.success(f"Configuration loaded - Table: {full_table_path}")
+logger.success(f"Configuration loaded - Host: {DATABRICKS_HOST}")
 
 # Get API token - using modern Databricks context API
 try:
@@ -612,15 +641,35 @@ except Exception as e:
     logger.error(f"Failed to retrieve API token: {str(e)}")
     raise
 
-# Initialize components
+# Initialize API Client
 api_client = APIClient(DATABRICKS_HOST, DATABRICKS_TOKEN)
-fetcher = EndpointConfigFetcher(full_table_path)
+
+# Step 1: Fetch all endpoints from API
+logger.info("\nFetching all endpoint configurations from Databricks API...")
+endpoints_list = api_client.fetch_all_endpoints()
+
+if not endpoints_list:
+    logger.error("No endpoints found or failed to fetch from API")
+    raise Exception("Failed to fetch endpoints from API")
+
+logger.success(f"Successfully fetched {len(endpoints_list)} endpoints")
+
+# Step 2: Convert to pandas DataFrame
+logger.info("Converting endpoints data to pandas DataFrame...")
+endpoints_df = pd.DataFrame(endpoints_list)
+logger.success(f"Created DataFrame with shape: {endpoints_df.shape}")
+
+# Display DataFrame columns for verification
+logger.info(f"DataFrame columns: {', '.join(endpoints_df.columns.tolist())}")
+
+# Initialize components with DataFrame
+fetcher = EndpointConfigFetcher(endpoints_df)
 deleter = EndpointDeleter(api_client.workspace_client)
 renamer = InferenceTableRenamer()
 creator = EndpointCreator(api_client)
 
 # Initialize orchestrator
-orchestrator = MigrationOrchestrator(config, api_client, fetcher, deleter, renamer, creator)
+orchestrator = MigrationOrchestrator(api_client, fetcher, deleter, renamer, creator)
 
 # Process all endpoints sequentially
 orchestrator.process_all_endpoints(endpoint_list)
@@ -670,26 +719,6 @@ results_df = results_df.withColumn(
 
 logger.info(f"\nMigration Results Summary:")
 display(results_df)
-
-# COMMAND ----------
-
-# DBTITLE 1, Write Results to Delta Table
-results_table_name = f"{catalog_name}.{schema_name}.batch_migration_results"
-
-try:
-    logger.debug(f"Attempting to write results to table: {results_table_name}")
-    
-    # Use modern Spark catalog API for table existence check
-    table_exists = spark.catalog.tableExists(results_table_name)
-    
-    if table_exists:
-        results_df.write.format("delta").mode("append").option("mergeSchema", "true").saveAsTable(results_table_name)
-        logger.success(f"Results appended to existing table: {results_table_name}")
-    else:
-        results_df.write.format("delta").mode("overwrite").saveAsTable(results_table_name)
-        logger.success(f"New table created and results written: {results_table_name}")
-except Exception as e:
-    logger.error(f"Failed to write results table: {str(e)}")
 
 # COMMAND ----------
 
